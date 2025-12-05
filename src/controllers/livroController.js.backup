@@ -1,0 +1,223 @@
+const pool = require('../config/database');
+const livroModel = require('../models/livroModel');
+
+const livroController = {
+  // Listar todos os livros
+  async listarLivros(req, res) {
+    try {
+      const livros = await livroModel.findAll();
+      res.json(livros);
+    } catch (error) {
+      console.error('Erro ao buscar livros:', error);
+      res.status(500).json({ 
+        error: 'Erro ao buscar livros',
+        details: error.message 
+      });
+    }
+  },
+
+  // Obter livro por ID
+  async obterLivro(req, res) {
+    try {
+      const { id } = req.params;
+      const livro = await livroModel.findById(id);
+      
+      if (!livro) {
+        return res.status(404).json({ error: 'Livro não encontrado' });
+      }
+      
+      res.json(livro);
+    } catch (error) {
+      console.error('Erro ao buscar livro:', error);
+      res.status(500).json({ 
+        error: 'Erro ao buscar livro',
+        details: error.message 
+      });
+    }
+  },
+
+  // Criar novo livro
+  async criarLivro(req, res) {
+    try {
+      const { titulo, autor, ano_publicacao, isbn } = req.body;
+      
+      if (!titulo || !autor) {
+        return res.status(400).json({ 
+          error: 'Título e autor são obrigatórios' 
+        });
+      }
+      
+      const novoLivro = await livroModel.create({
+        titulo,
+        autor,
+        ano_publicacao,
+        isbn
+      });
+      
+      res.status(201).json(novoLivro);
+
+    } catch (error) {
+      console.error('Erro ao criar livro:', error);
+      res.status(500).json({ 
+        error: 'Erro ao criar livro',
+        details: error.message 
+      });
+    }
+  },
+
+  // Atualizar livro
+  async atualizarLivro(req, res) {
+    try {
+      const { id } = req.params;
+      const { titulo, autor, ano_publicacao, isbn, disponivel } = req.body;
+      
+      const livroExistente = await livroModel.findById(id);
+      if (!livroExistente) {
+        return res.status(404).json({ error: 'Livro não encontrado' });
+      }
+      
+      const atualizado = await livroModel.update(id, {
+        titulo: titulo || livroExistente.titulo,
+        autor: autor || livroExistente.autor,
+        ano_publicacao: ano_publicacao || livroExistente.ano_publicacao,
+        isbn: isbn || livroExistente.isbn,
+        disponivel: disponivel !== undefined ? disponivel : livroExistente.disponivel
+      });
+      
+      if (atualizado) {
+        const livroAtualizado = await livroModel.findById(id);
+        res.json(livroAtualizado);
+      } else {
+        res.status(400).json({ error: 'Erro ao atualizar livro' });
+      }
+    } catch (error) {
+      console.error('Erro ao atualizar livro:', error);
+      res.status(500).json({ 
+        error: 'Erro ao atualizar livro',
+        details: error.message 
+      });
+    }
+  },
+
+  // Excluir livro
+  async excluirLivro(req, res) {
+    try {
+      const { id } = req.params;
+      console.log(`Tentando excluir livro ID: ${id}`);
+      
+      // Verificar se livro existe
+      const livroExistente = await livroModel.findById(id);
+      if (!livroExistente) {
+        return res.status(404).json({ error: 'Livro não encontrado' });
+      }
+      
+      // Verificar se há empréstimos ATIVOS para este livro
+      // IMPORTANTE: Só contar empréstimos que não foram devolvidos (data_devolvida IS NULL)
+      const [emprestimos] = await pool.query(
+        `SELECT COUNT(*) as total 
+         FROM emprestimos 
+         WHERE livro_id = ? 
+         AND data_devolvida IS NULL`,  // <-- AQUI ESTÁ A CORREÇÃO!
+        [id]
+      );
+      
+      if (emprestimos[0].total > 0) {
+        return res.status(400).json({ 
+          error: 'Não é possível excluir este livro',
+          details: `Existem ${emprestimos[0].total} empréstimo(s) ATIVO(S) para este livro.`,
+          suggestion: 'Devolva o livro antes de tentar excluí-lo.'
+        });
+      }
+      
+      const excluido = await livroModel.delete(id);
+      
+      if (excluido) {
+        console.log(`Livro ${id} excluído com sucesso`);
+        res.status(204).send();
+      } else {
+        res.status(400).json({ error: 'Erro ao excluir livro' });
+      }
+    } catch (error) {
+      console.error('Erro detalhado ao excluir livro:', error);
+      res.status(500).json({ 
+        error: 'Erro ao excluir livro',
+        details: error.message,
+        code: error.code
+      });
+    }
+  },
+
+  // Listar livros disponíveis
+  async listarLivrosDisponiveis(req, res) {
+    try {
+      const livros = await livroModel.findDisponiveis();
+      res.json(livros);
+    } catch (error) {
+      console.error('Erro ao buscar livros disponíveis:', error);
+      res.status(500).json({ 
+        error: 'Erro ao buscar livros disponíveis',
+        details: error.message 
+      });
+    }
+  }
+};
+
+// ... outras funções existentes ...
+
+const excluirLivro = async (req, res) => {
+  const { id } = req.params;
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    // 1. Primeiro excluir todos os empréstimos deste livro
+    const [resultEmprestimos] = await connection.query(
+      'DELETE FROM emprestimos WHERE livro_id = ?',
+      [id]
+    );
+    
+    console.log(`Empréstimos excluídos: ${resultEmprestimos.affectedRows}`);
+    
+    // 2. Depois excluir o livro
+    const [resultLivro] = await connection.query(
+      'DELETE FROM livros WHERE id = ?',
+      [id]
+    );
+    
+    if (resultLivro.affectedRows === 0) {
+      await connection.rollback();
+      return res.status(404).json({ 
+        error: 'Livro não encontrado' 
+      });
+    }
+    
+    await connection.commit();
+    
+    res.status(200).json({ 
+      message: 'Livro excluído com sucesso',
+      detalhes: {
+        livroExcluido: resultLivro.affectedRows,
+        emprestimosExcluidos: resultEmprestimos.affectedRows
+      }
+    });
+    
+  } catch (error) {
+    await connection.rollback();
+    console.error('Erro ao excluir livro:', error);
+    
+    res.status(500).json({ 
+      error: 'Erro ao excluir livro',
+      detalhes: error.message 
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+// ... e no module.exports, adicione a nova função:
+module.exports = {
+  // ... outras funções exportadas existentes ...
+  excluirLivro
+};
+module.exports = livroController;
