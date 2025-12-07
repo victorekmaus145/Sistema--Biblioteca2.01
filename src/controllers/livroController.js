@@ -2,7 +2,9 @@ const pool = require('../config/database');
 
 const listarLivros = async (req, res) => {
   try {
-    const [result] = await pool.query('SELECT * FROM livros ORDER BY id DESC');
+    const [result] = await pool.query(
+      'SELECT id, titulo, autor, ano_publicacao, isbn, disponivel FROM livros ORDER BY id DESC'
+    );
     res.status(200).json(result);
   } catch (error) {
     console.error('Erro ao listar livros:', error);

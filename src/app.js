@@ -1,5 +1,7 @@
 const express = require('express');
+const cors = require('cors'); 
 require('dotenv').config();
+
 
 // Importar rotas
 const livroRoutes = require('./routes/livroRoutes');
@@ -8,6 +10,12 @@ const emprestimoRoutes = require('./routes/emprestimoRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+app.use(cors({
+  origin: 'http://localhost:3001', // URL do seu frontend
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+}));
 
 // Middleware para JSON
 app.use(express.json());

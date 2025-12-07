@@ -1,179 +1,230 @@
-const emprestimoModel = require('../models/emprestimoModel');
-const livroModel = require('../models/livroModel');
-const usuarioModel = require('../models/usuarioModel');
+const pool = require('../config/database');
 
-const emprestimoController = {
-  // Listar todos os empréstimos
-  async listarEmprestimos(req, res) {
-    try {
-      console.log('Buscando todos os empréstimos...');
-      const emprestimos = await emprestimoModel.findAll();
-      res.json(emprestimos);
-    } catch (error) {
-      console.error('Erro ao buscar empréstimos:', error);
-      res.status(500).json({ 
-        error: 'Erro ao buscar empréstimos',
-        details: error.message 
+// ========== CRIAR EMPRÉSTIMO (COM ATUALIZAÇÃO DO STATUS) ==========
+const criarEmprestimo = async (req, res) => {
+  const { usuario_id, livro_id } = req.body;
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    console.log('🔄 Criando empréstimo - Livro ID:', livro_id, 'Usuário ID:', usuario_id);
+    
+    // 1. VERIFICAR SE O LIVRO EXISTE E ESTÁ DISPONÍVEL
+    const [livro] = await connection.query(
+      'SELECT id, titulo, disponivel FROM livros WHERE id = ? FOR UPDATE',
+      [livro_id]
+    );
+    
+    if (livro.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ 
+        success: false,
+        error: 'Livro não encontrado' 
       });
     }
-  },
-
-  // Obter empréstimo por ID
-  async obterEmprestimo(req, res) {
-    try {
-      const { id } = req.params;
-      console.log(`Buscando empréstimo ID: ${id}`);
-      
-      const emprestimo = await emprestimoModel.findById(id);
-      
-      if (!emprestimo) {
-        return res.status(404).json({ error: 'Empréstimo não encontrado' });
-      }
-      
-      res.json(emprestimo);
-    } catch (error) {
-      console.error('Erro ao buscar empréstimo:', error);
-      res.status(500).json({ 
-        error: 'Erro ao buscar empréstimo',
-        details: error.message 
+    
+    // Verificar disponibilidade (disponivel = 1 = TRUE, 0 = FALSE)
+    if (livro[0].disponivel === 0) {
+      await connection.rollback();
+      return res.status(400).json({ 
+        success: false,
+        error: `O livro "${livro[0].titulo}" não está disponível para empréstimo`
       });
     }
-  },
-
-  // Criar novo empréstimo
-  async criarEmprestimo(req, res) {
-    try {
-      const { usuario_id, livro_id } = req.body;
-      console.log('Criando novo empréstimo:', { usuario_id, livro_id });
-      
-      // Validação
-      if (!usuario_id || !livro_id) {
-        return res.status(400).json({ 
-          error: 'Usuário ID e Livro ID são obrigatórios' 
-        });
-      }
-      
-      // Verificar se usuário existe
-      const usuario = await usuarioModel.findById(usuario_id);
-      if (!usuario) {
-        return res.status(404).json({ error: 'Usuário não encontrado' });
-      }
-      
-      // Verificar se livro existe
-      const livro = await livroModel.findById(livro_id);
-      if (!livro) {
-        return res.status(404).json({ error: 'Livro não encontrado' });
-      }
-      
-      // Verificar se livro está disponível
-      if (!livro.disponivel) {
-        return res.status(400).json({ 
-          error: 'Livro não está disponível para empréstimo' 
-        });
-      }
-      
-      // Verificar se usuário já tem este livro emprestado
-      const jaEmprestado = await emprestimoModel.verificarEmprestimoAtivo(usuario_id, livro_id);
-      if (jaEmprestado) {
-        return res.status(400).json({ 
-          error: 'Usuário já tem este livro emprestado' 
-        });
-      }
-      
-      const novoEmprestimo = await emprestimoModel.create({
-        usuario_id,
-        livro_id
-      });
-      
-      console.log('Empréstimo criado com ID:', novoEmprestimo.id);
-      res.status(201).json(novoEmprestimo);
-    } catch (error) {
-      console.error('Erro ao criar empréstimo:', error);
-      res.status(500).json({ 
-        error: 'Erro ao criar empréstimo',
-        details: error.message 
+    
+    // 2. VERIFICAR SE O USUÁRIO EXISTE
+    const [usuario] = await connection.query(
+      'SELECT id, nome FROM usuarios WHERE id = ?',
+      [usuario_id]
+    );
+    
+    if (usuario.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ 
+        success: false,
+        error: 'Usuário não encontrado' 
       });
     }
-  },
-
-  // Devolver livro
-  async devolverLivro(req, res) {
-    try {
-      const { id } = req.params;
-      console.log(`Devolvendo empréstimo ID: ${id}`);
-      
-      // Verificar se empréstimo existe
-      const emprestimo = await emprestimoModel.findById(id);
-      if (!emprestimo) {
-        return res.status(404).json({ error: 'Empréstimo não encontrado' });
+    
+    // 3. CRIAR O REGISTRO DE EMPRÉSTIMO
+    const [result] = await connection.query(
+      'INSERT INTO emprestimos (usuario_id, livro_id, data_emprestimo) VALUES (?, ?, CURDATE())',
+      [usuario_id, livro_id]
+    );
+    
+    console.log('✅ Empréstimo criado com ID:', result.insertId);
+    
+    // 4. ATUALIZAR O LIVRO PARA INDISPONÍVEL (disponivel = 0)
+    await connection.query(
+      'UPDATE livros SET disponivel = 0 WHERE id = ?',
+      [livro_id]
+    );
+    
+    console.log('✅ Livro ID', livro_id, 'atualizado para INDISPONÍVEL');
+    
+    await connection.commit();
+    
+    res.status(201).json({ 
+      success: true,
+      message: 'Empréstimo realizado com sucesso!',
+      data: {
+        emprestimo_id: result.insertId,
+        livro_id: livro_id,
+        livro_titulo: livro[0].titulo,
+        usuario_nome: usuario[0].nome,
+        disponivel: false
       }
-      
-      // Verificar se já foi devolvido
-      if (emprestimo.data_devolvida) {
-        return res.status(400).json({ 
-          error: 'Este livro já foi devolvido' 
-        });
-      }
-      
-      const devolvido = await emprestimoModel.devolver(id);
-      
-      if (devolvido) {
-        res.json({ 
-          message: 'Livro devolvido com sucesso',
-          emprestimo_id: id 
-        });
-      } else {
-        res.status(400).json({ error: 'Erro ao devolver livro' });
-      }
-    } catch (error) {
-      console.error('Erro ao devolver livro:', error);
-      res.status(500).json({ 
-        error: 'Erro ao devolver livro',
-        details: error.message 
-      });
-    }
-  },
-
-  // Listar empréstimos ativos
-  async listarEmprestimosAtivos(req, res) {
-    try {
-      console.log('Buscando empréstimos ativos...');
-      const emprestimos = await emprestimoModel.findAtivos();
-      res.json(emprestimos);
-    } catch (error) {
-      console.error('Erro ao buscar empréstimos ativos:', error);
-      res.status(500).json({ 
-        error: 'Erro ao buscar empréstimos ativos',
-        details: error.message 
-      });
-    }
-  },
-
-  // Listar empréstimos por usuário
-  async listarEmprestimosPorUsuario(req, res) {
-    try {
-      const { usuario_id } = req.params;
-      console.log(`Buscando empréstimos do usuário ID: ${usuario_id}`);
-      
-      // Verificar se usuário existe
-      const usuario = await usuarioModel.findById(usuario_id);
-      if (!usuario) {
-        return res.status(404).json({ error: 'Usuário não encontrado' });
-      }
-      
-      const emprestimos = await emprestimoModel.findByUsuario(usuario_id);
-      res.json({
-        usuario,
-        emprestimos
-      });
-    } catch (error) {
-      console.error('Erro ao buscar empréstimos por usuário:', error);
-      res.status(500).json({ 
-        error: 'Erro ao buscar empréstimos por usuário',
-        details: error.message 
-      });
-    }
+    });
+    
+  } catch (error) {
+    await connection.rollback();
+    console.error('❌ Erro ao criar empréstimo:', error);
+    
+    res.status(500).json({ 
+      success: false,
+      error: 'Erro ao criar empréstimo',
+      detalhes: error.message 
+    });
+  } finally {
+    connection.release();
   }
 };
 
-module.exports = emprestimoController;
+// ========== FINALIZAR EMPRÉSTIMO (DEVOLUÇÃO) ==========
+const finalizarEmprestimo = async (req, res) => {
+  const { id } = req.params;
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    console.log('🔄 Finalizando empréstimo ID:', id);
+    
+    // 1. BUSCAR O EMPRÉSTIMO
+    const [emprestimo] = await connection.query(
+      'SELECT e.*, l.titulo, u.nome FROM emprestimos e ' +
+      'JOIN livros l ON e.livro_id = l.id ' +
+      'JOIN usuarios u ON e.usuario_id = u.id ' +
+      'WHERE e.id = ?',
+      [id]
+    );
+    
+    if (emprestimo.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ 
+        success: false,
+        error: 'Empréstimo não encontrado' 
+      });
+    }
+    
+    const emprestimoData = emprestimo[0];
+    
+    // Verificar se já foi devolvido
+    if (emprestimoData.data_devolvida) {
+      await connection.rollback();
+      return res.status(400).json({ 
+        success: false,
+        error: 'Este empréstimo já foi finalizado' 
+      });
+    }
+    
+    // 2. ATUALIZAR DATA DE DEVOLUÇÃO
+    await connection.query(
+      'UPDATE emprestimos SET data_devolvida = CURDATE() WHERE id = ?',
+      [id]
+    );
+    
+    console.log('✅ Data de devolução registrada para empréstimo ID:', id);
+    
+    // 3. ATUALIZAR O LIVRO PARA DISPONÍVEL (disponivel = 1)
+    await connection.query(
+      'UPDATE livros SET disponivel = 1 WHERE id = ?',
+      [emprestimoData.livro_id]
+    );
+    
+    console.log('✅ Livro ID', emprestimoData.livro_id, 'atualizado para DISPONÍVEL');
+    
+    await connection.commit();
+    
+    res.status(200).json({ 
+      success: true,
+      message: 'Devolução realizada com sucesso!',
+      data: {
+        emprestimo_id: id,
+        livro_id: emprestimoData.livro_id,
+        livro_titulo: emprestimoData.titulo,
+        usuario_nome: emprestimoData.nome,
+        disponivel: true
+      }
+    });
+    
+  } catch (error) {
+    await connection.rollback();
+    console.error('❌ Erro ao finalizar empréstimo:', error);
+    
+    res.status(500).json({ 
+      success: false,
+      error: 'Erro ao finalizar empréstimo',
+      detalhes: error.message 
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+// ========== LISTAR EMPRÉSTIMOS ==========
+const listarEmprestimos = async (req, res) => {
+  try {
+    const [result] = await pool.query(
+      'SELECT e.*, l.titulo as livro_titulo, u.nome as usuario_nome ' +
+      'FROM emprestimos e ' +
+      'JOIN livros l ON e.livro_id = l.id ' +
+      'JOIN usuarios u ON e.usuario_id = u.id ' +
+      'ORDER BY e.data_emprestimo DESC'
+    );
+    
+    res.status(200).json({ 
+      success: true,
+      data: result 
+    });
+  } catch (error) {
+    console.error('❌ Erro ao listar empréstimos:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Erro ao listar empréstimos' 
+    });
+  }
+};
+
+// ========== BUSCAR EMPRÉSTIMOS ATIVOS ==========
+const listarEmprestimosAtivos = async (req, res) => {
+  try {
+    const [result] = await pool.query(
+      'SELECT e.*, l.titulo as livro_titulo, u.nome as usuario_nome ' +
+      'FROM emprestimos e ' +
+      'JOIN livros l ON e.livro_id = l.id ' +
+      'JOIN usuarios u ON e.usuario_id = u.id ' +
+      'WHERE e.data_devolvida IS NULL ' +
+      'ORDER BY e.data_emprestimo DESC'
+    );
+    
+    res.status(200).json({ 
+      success: true,
+      data: result 
+    });
+  } catch (error) {
+    console.error('❌ Erro ao listar empréstimos ativos:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Erro ao listar empréstimos ativos' 
+    });
+  }
+};
+
+module.exports = {
+  criarEmprestimo,
+  finalizarEmprestimo,
+  listarEmprestimos,
+  listarEmprestimosAtivos
+};
